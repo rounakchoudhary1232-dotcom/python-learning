@@ -1,0 +1,32 @@
+#student marks manager
+Marks = []
+Marks.append(int(input("store subject one : ")))
+Marks.append(int(input("store subject two : ")))
+Marks.append(int(input("store subject three : ")))
+Marks.append(int(input("store subject four : ")))
+Marks.append(int(input("store subject five : ")))
+
+
+print(Marks)
+(Marks.sort(reverse=True))
+print("Higher to lower marks : ", Marks)
+
+
+
+new_marks = input("enter new marks( Enter = Skip) : ")
+if(new_marks !=""):
+    Marks.append(int(new_marks))
+else:
+    print("skiped")    
+print(Marks)    
+
+remove_marks = input("enter marks to remove from list (Enter = Skip) : ")
+if(remove_marks !=""):
+    Marks.remove(int(remove_marks))
+else:
+    print("NO MARKS REMOVE")    
+print(Marks)
+
+count_marks = input("to count the the marks (Enter = Skip) : ")
+if(count_marks !=""):
+    print(Marks.count(int(count_marks)))
