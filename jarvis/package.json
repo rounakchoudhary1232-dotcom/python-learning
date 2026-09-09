@@ -1,0 +1,11 @@
+{
+  "name": "jarvis-platform",
+  "private": true,
+  "workspaces": ["apps/web", "packages/*"],
+  "scripts": {
+    "dev:web": "npm --workspace @jarvis/web run dev",
+    "lint:web": "npm --workspace @jarvis/web run lint",
+    "test:web": "npm --workspace @jarvis/web run test",
+    "build:web": "npm --workspace @jarvis/web run build"
+  }
+}
