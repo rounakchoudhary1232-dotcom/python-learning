@@ -1,0 +1,6 @@
+"""Provider-neutral contracts for later phases; implementations are deliberately absent in Phase 1."""
+from typing import Protocol
+class AIService(Protocol):
+    async def respond(self, request: str, *, user_id: str) -> str: ...
+class ToolService(Protocol):
+    async def execute(self, tool_name: str, payload: dict[str, object], *, user_id: str) -> dict[str, object]: ...

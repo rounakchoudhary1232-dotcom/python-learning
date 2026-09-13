@@ -1,0 +1,2 @@
+import { cn } from "@/lib/utils";
+export function JarvisLogo({ compact = false }: { compact?: boolean }) { return <div className="flex items-center gap-3"><span className="grid size-9 place-items-center rounded-xl border border-cyan-300/30 bg-cyan-300/10 shadow-[inset_0_0_18px_rgba(34,211,238,.08)]"><span className="size-3 rounded-sm border border-cyan-200/90 bg-cyan-300/30 rotate-45" /></span>{!compact && <span className="text-sm font-semibold tracking-[0.26em] text-white">JARVIS</span>}</div>; }

@@ -1,0 +1,4 @@
+import { ShieldCheck } from "lucide-react";
+import { GlassCard } from "@/components/ui/glass-card";
+const statuses=[["JARVIS Online","Connected"],["AI Core","Ready"],["Memory","Active"],["Voice","Ready"],["Vision","Ready"],["Tools","Connected"],["System","Operational"]];
+export function SystemStatus(){return <GlassCard className="p-5"><div className="flex items-center gap-2"><ShieldCheck size={18} className="text-cyan-300"/><h2 className="font-medium text-slate-100">System status</h2></div><p className="mt-2 text-xs leading-5 text-slate-500">Interface readiness indicators for Phase 1. No services are invoked from this screen.</p><div className="mt-5 space-y-3">{statuses.map(([name,state])=><div key={name} className="flex items-center justify-between text-sm"><span className="text-slate-400">{name}</span><span className="flex items-center gap-2 text-xs text-emerald-300"><span className="size-1.5 rounded-full bg-emerald-400"/>{state}</span></div>)}</div></GlassCard>}
