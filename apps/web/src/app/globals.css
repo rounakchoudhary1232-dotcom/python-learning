@@ -1,0 +1,16 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; background: #090b10; color: #e9f0f7; font-family: Arial, Helvetica, sans-serif; }
+button, input { font: inherit; }
+.field { border: 1px solid rgba(255,255,255,.10); border-radius: .75rem; background: rgba(255,255,255,.035); color: #e9f0f7; padding: .72rem .85rem; outline: none; }
+.field:focus { border-color: rgba(87,216,255,.65); box-shadow: 0 0 0 3px rgba(87,216,255,.1); }
+.primary { display: inline-flex; align-items: center; justify-content: center; gap: .5rem; border: 0; border-radius: .75rem; background: #57d8ff; color: #081018; font-size: .875rem; font-weight: 600; padding: .72rem 1rem; }
+.primary:disabled { cursor: not-allowed; opacity: .45; }
+.nav-item { display:flex; width:100%; align-items:center; gap:.55rem; border-radius:.6rem; padding:.55rem; color:#9aa6b7; font-size:.82rem; text-align:left; }
+.nav-item:hover { background:rgba(255,255,255,.05); color:#e9f0f7; }
+::selection { background: rgba(87,216,255,.25); }
+.grid-background { background-image: linear-gradient(rgba(113, 145, 175, .045) 1px, transparent 1px), linear-gradient(90deg, rgba(113,145,175,.045) 1px, transparent 1px); background-size: 42px 42px; }
