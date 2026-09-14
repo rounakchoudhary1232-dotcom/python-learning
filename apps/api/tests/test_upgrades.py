@@ -29,8 +29,9 @@ class FakeAI:
     def respond(self, messages: list[ChatTurn]) -> str: return self.response
 
 class SequencedFakeAI:
-    def __init__(self, responses: list[str]): self.responses, self.calls = responses, 0
+    def __init__(self, responses: list[str]): self.responses, self.calls, self.messages = responses, 0, []
     def respond(self, messages: list[ChatTurn]) -> str:
+        self.messages.append(messages)
         response = self.responses[self.calls]
         self.calls += 1
         return response
@@ -69,6 +70,25 @@ def test_incomplete_generated_patch_is_regenerated(incomplete_patch, tmp_path) -
     assert plan.patch == PATCH
     assert plan.affected_files == ["apps/web/src/features/safe.tsx"]
     assert ai.calls == 2
+
+def test_stale_patch_is_regenerated_from_refreshed_file_context(tmp_path, monkeypatch) -> None:
+    target = tmp_path / "apps/web/src/features/safe.tsx"
+    target.parent.mkdir(parents=True)
+    target.write_text("current\n", encoding="utf-8")
+    stale = PATCH.replace("-old", "-stale")
+    stale_plan = json.dumps({"plan":"Update label.", "risk":"low", "affected_files":["apps/web/src/features/safe.tsx"], "patch":stale})
+    refreshed = PATCH.replace("-old", "-current")
+    refreshed_plan = json.dumps({"plan":"Update label.", "risk":"low", "affected_files":["apps/web/src/features/safe.tsx"], "patch":refreshed})
+    ai = SequencedFakeAI([stale_plan, refreshed_plan])
+    planner = UpgradePlanner(ai, CodebaseAnalyzer(tmp_path))
+    results = iter(["error: patch does not apply", None])
+    monkeypatch.setattr(planner, "_patch_apply_error", lambda patch: next(results))
+
+    plan = planner.create_plan("Update the safe label")
+
+    assert plan.patch == refreshed
+    assert ai.calls == 2
+    assert "--- apps/web/src/features/safe.tsx\ncurrent" in ai.messages[1][0].content
 
 def test_valid_unified_patch_is_accepted() -> None:
     assert patch_paths(PATCH) == ["apps/web/src/features/safe.tsx"]

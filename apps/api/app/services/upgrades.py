@@ -222,6 +222,17 @@ class CodebaseAnalyzer:
         # File inventory permits useful planning without uploading source or secrets.
         return "\n".join(self.inventory())
 
+    def refreshed_file_context(self, paths: list[str]) -> str:
+        """Read the current allowlisted files immediately before patch regeneration."""
+        contents: list[str] = []
+        for path in paths:
+            normalized = validate_upgrade_path(path)
+            candidate = self.root / normalized
+            if not candidate.is_file() or candidate.stat().st_size > 40_000:
+                continue
+            contents.append(f"--- {normalized}\n{candidate.read_text(encoding='utf-8')}")
+        return "\n".join(contents)
+
 
 class UpgradePlanner:
     def __init__(self, ai: ConversationAIService, analyzer: CodebaseAnalyzer | None = None):
@@ -233,17 +244,32 @@ class UpgradePlanner:
         plan = self._parse_plan(raw)
         if plan.risk not in {"low", "medium", "high"}:
             raise UpgradeSafetyError("The upgrade plan has an invalid risk level.")
+        regenerated = False
         try:
             actual_paths = patch_paths(plan.patch)
         except UpgradeSafetyError as exc:
             if not needs_patch_regeneration(plan.patch) and not str(exc).startswith("Malformed unified diff:"):
                 raise
             plan = self._parse_plan(self._regenerate(feature_request, plan, exc))
+            regenerated = True
             if plan.risk not in {"low", "medium", "high"}:
                 raise UpgradeSafetyError("The upgrade plan has an invalid risk level.")
             actual_paths = patch_paths(plan.patch)
         if set(plan.affected_files) != set(actual_paths):
             raise UpgradeSafetyError("The affected-file list does not match the proposed patch.")
+        apply_error = self._patch_apply_error(plan.patch)
+        if apply_error and "patch does not apply" in apply_error.lower():
+            if regenerated:
+                raise UpgradeSafetyError("The regenerated patch does not apply to the current working tree.")
+            plan = self._parse_plan(self._regenerate(feature_request, plan, UpgradeSafetyError(apply_error)))
+            if plan.risk not in {"low", "medium", "high"}:
+                raise UpgradeSafetyError("The upgrade plan has an invalid risk level.")
+            actual_paths = patch_paths(plan.patch)
+            if set(plan.affected_files) != set(actual_paths):
+                raise UpgradeSafetyError("The affected-file list does not match the proposed patch.")
+            apply_error = self._patch_apply_error(plan.patch)
+            if apply_error:
+                raise UpgradeSafetyError("The regenerated patch does not apply to the current working tree.")
         return plan
 
     def _parse_plan(self, raw: str) -> UpgradePlan:
@@ -260,8 +286,32 @@ class UpgradePlanner:
             raise UpgradeSafetyError("The AI provider returned an invalid upgrade plan.") from exc
 
     def _regenerate(self, feature_request: str, plan: UpgradePlan, error: UpgradeSafetyError) -> str:
-        prompt = f"""Regenerate ULTRON's upgrade plan because its patch was incomplete or malformed. Return ONLY JSON with string keys plan, risk, patch and array affected_files. Implement the original request using the allowed inventory. The patch must make the requested change, touch exactly affected_files, and be a complete deterministic Git unified diff: each file needs `diff --git a/<path> b/<path>`, `---`, `+++`, valid counted `@@` hunks, and a final newline. Do not emit prose, markdown fences, placeholders, ellipses, binary changes, renames, or copies. Do not modify protected files or include credentials. The previous patch was rejected: {redact_text(str(error))}.\n\nOriginal request:\n{feature_request}\n\nPrevious affected files:\n{json.dumps(plan.affected_files)}\n\nAllowed repository inventory:\n{self.analyzer.context()}"""
+        refreshed_context = self.analyzer.refreshed_file_context(plan.affected_files)
+        prompt = f"""Regenerate ULTRON's upgrade plan because its patch was incomplete, malformed, or stale. Return ONLY JSON with string keys plan, risk, patch and array affected_files. Implement the original request using the refreshed file contents below. The patch must make the requested change, touch exactly affected_files, and be a complete deterministic Git unified diff: each file needs `diff --git a/<path> b/<path>`, `---`, `+++`, valid counted `@@` hunks, and a final newline. Do not emit prose, markdown fences, placeholders, ellipses, binary changes, renames, or copies. Do not modify protected files or include credentials. The previous patch was rejected: {redact_text(str(error))}.\n\nOriginal request:\n{feature_request}\n\nPrevious affected files:\n{json.dumps(plan.affected_files)}\n\nRefreshed affected-file contents:\n{refreshed_context}\n\nAllowed repository inventory:\n{self.analyzer.context()}"""
         return self.ai.respond([ChatTurn(role="user", content=prompt)])
+
+    def _patch_apply_error(self, patch: str) -> str | None:
+        """Return a read-only Git applicability failure, or None when unavailable/passing."""
+        try:
+            # A new-file patch has no current file to compare; Git validates it
+            # at execution.  Check stale context only for existing targets.
+            if any(not (self.analyzer.root / path).is_file() for path in patch_paths(patch)):
+                return None
+            inside_tree = subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"], cwd=self.analyzer.root,
+                shell=False, capture_output=True, text=True, timeout=15, check=False,
+            )
+            if inside_tree.returncode or inside_tree.stdout.strip() != "true":
+                return None
+            checked = subprocess.run(
+                ["git", "apply", "--check", "-"], cwd=self.analyzer.root, input=patch,
+                shell=False, capture_output=True, text=True, timeout=15, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if checked.returncode:
+            return (checked.stderr or checked.stdout or "git apply --check failed").strip()
+        return None
 
 
 class CommandRunner(Protocol):
