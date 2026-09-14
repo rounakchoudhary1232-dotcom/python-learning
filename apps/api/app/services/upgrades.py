@@ -17,6 +17,7 @@ from typing import Protocol
 from .ai import ChatTurn, ConversationAIService
 
 MAX_PATCH_BYTES = 250_000
+MIN_GENERATED_PATCH_BYTES = 64
 SAFE_PREFIXES = ("apps/api/app/", "apps/api/tests/", "apps/web/src/", "apps/web/tests/", "docs/")
 PROTECTED_PATHS = {
     ".env", ".env.example", "apps/api/app/config.py", "apps/api/app/database.py",
@@ -191,6 +192,11 @@ def patch_paths(patch: str) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
+def needs_patch_regeneration(patch: str) -> bool:
+    """Identify incomplete model output that merits one constrained retry."""
+    return not patch.strip() or len(patch.encode()) < MIN_GENERATED_PATCH_BYTES or not patch.endswith("\n")
+
+
 class CodebaseAnalyzer:
     def __init__(self, root: Path | None = None):
         self.root = root or project_root()
@@ -224,10 +230,27 @@ class UpgradePlanner:
     def create_plan(self, feature_request: str) -> UpgradePlan:
         prompt = f"""You are ULTRON's constrained self-upgrade planner. Analyze the feature request and repository inventory below. Return ONLY JSON with string keys plan, risk, patch and array affected_files. risk must be low, medium, or high. patch must be a deterministic Git unified diff: for every changed file emit exactly `diff --git a/<path> b/<path>`, `--- a/<path>` (or `/dev/null`), and `+++ b/<path>` (or `/dev/null`) before its hunks. Every hunk must use `@@ -old_start,old_count +new_start,new_count @@` and its old/new counts must exactly match its `-`/`+`/context lines. Do not emit prose, markdown fences, ellipses, binary changes, renames, copies, or omitted/truncated hunks. End the patch with a newline. Never modify .env, auth, security, database/migration, upgrade-engine, or API routing files. Never include secrets. If no safe patch is possible, use an empty patch and explain why in plan.\n\nFeature request:\n{feature_request}\n\nAllowed repository inventory:\n{self.analyzer.context()}"""
         raw = self.ai.respond([ChatTurn(role="user", content=prompt)])
+        plan = self._parse_plan(raw)
+        if plan.risk not in {"low", "medium", "high"}:
+            raise UpgradeSafetyError("The upgrade plan has an invalid risk level.")
+        try:
+            actual_paths = patch_paths(plan.patch)
+        except UpgradeSafetyError as exc:
+            if not needs_patch_regeneration(plan.patch) and not str(exc).startswith("Malformed unified diff:"):
+                raise
+            plan = self._parse_plan(self._regenerate(feature_request, plan, exc))
+            if plan.risk not in {"low", "medium", "high"}:
+                raise UpgradeSafetyError("The upgrade plan has an invalid risk level.")
+            actual_paths = patch_paths(plan.patch)
+        if set(plan.affected_files) != set(actual_paths):
+            raise UpgradeSafetyError("The affected-file list does not match the proposed patch.")
+        return plan
+
+    def _parse_plan(self, raw: str) -> UpgradePlan:
         try:
             content = raw.strip().removeprefix("```json").removesuffix("```").strip()
             value = json.loads(content)
-            plan = UpgradePlan(
+            return UpgradePlan(
                 plan=redact_text(str(value["plan"]))[:8000],
                 affected_files=[validate_upgrade_path(str(p)) for p in value["affected_files"]],
                 risk=str(value.get("risk", "medium")).lower(),
@@ -235,12 +258,10 @@ class UpgradePlanner:
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise UpgradeSafetyError("The AI provider returned an invalid upgrade plan.") from exc
-        if plan.risk not in {"low", "medium", "high"}:
-            raise UpgradeSafetyError("The upgrade plan has an invalid risk level.")
-        actual_paths = patch_paths(plan.patch)
-        if set(plan.affected_files) != set(actual_paths):
-            raise UpgradeSafetyError("The affected-file list does not match the proposed patch.")
-        return plan
+
+    def _regenerate(self, feature_request: str, plan: UpgradePlan, error: UpgradeSafetyError) -> str:
+        prompt = f"""Regenerate ULTRON's upgrade plan because its patch was incomplete or malformed. Return ONLY JSON with string keys plan, risk, patch and array affected_files. Implement the original request using the allowed inventory. The patch must make the requested change, touch exactly affected_files, and be a complete deterministic Git unified diff: each file needs `diff --git a/<path> b/<path>`, `---`, `+++`, valid counted `@@` hunks, and a final newline. Do not emit prose, markdown fences, placeholders, ellipses, binary changes, renames, or copies. Do not modify protected files or include credentials. The previous patch was rejected: {redact_text(str(error))}.\n\nOriginal request:\n{feature_request}\n\nPrevious affected files:\n{json.dumps(plan.affected_files)}\n\nAllowed repository inventory:\n{self.analyzer.context()}"""
+        return self.ai.respond([ChatTurn(role="user", content=prompt)])
 
 
 class CommandRunner(Protocol):

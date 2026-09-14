@@ -28,6 +28,13 @@ class FakeAI:
     def __init__(self, response: str): self.response = response
     def respond(self, messages: list[ChatTurn]) -> str: return self.response
 
+class SequencedFakeAI:
+    def __init__(self, responses: list[str]): self.responses, self.calls = responses, 0
+    def respond(self, messages: list[ChatTurn]) -> str:
+        response = self.responses[self.calls]
+        self.calls += 1
+        return response
+
 @pytest.fixture
 def client():
     with TestClient(app) as test_client:
@@ -52,6 +59,16 @@ def test_plan_is_only_created_and_never_applied_before_approval(tmp_path) -> Non
     payload = json.dumps({"plan":"Add a safe label.", "risk":"low", "affected_files":["apps/web/src/features/safe.tsx"], "patch":PATCH})
     plan = UpgradePlanner(FakeAI(payload), CodebaseAnalyzer(tmp_path)).create_plan("Add a safe label to the workspace")
     assert plan.affected_files == ["apps/web/src/features/safe.tsx"]
+
+@pytest.mark.parametrize("incomplete_patch", ["", " \t ", "+x\n", PATCH.rstrip("\n")], ids=["empty", "whitespace", "too-small", "truncated"])
+def test_incomplete_generated_patch_is_regenerated(incomplete_patch, tmp_path) -> None:
+    invalid = json.dumps({"plan":"Add a safe label.", "risk":"low", "affected_files":["apps/web/src/features/safe.tsx"], "patch":incomplete_patch})
+    valid = json.dumps({"plan":"Add a safe label.", "risk":"low", "affected_files":["apps/web/src/features/safe.tsx"], "patch":PATCH})
+    ai = SequencedFakeAI([invalid, valid])
+    plan = UpgradePlanner(ai, CodebaseAnalyzer(tmp_path)).create_plan("Add a safe label to the workspace")
+    assert plan.patch == PATCH
+    assert plan.affected_files == ["apps/web/src/features/safe.tsx"]
+    assert ai.calls == 2
 
 def test_valid_unified_patch_is_accepted() -> None:
     assert patch_paths(PATCH) == ["apps/web/src/features/safe.tsx"]
