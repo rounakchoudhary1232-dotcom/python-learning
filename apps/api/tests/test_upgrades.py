@@ -45,6 +45,22 @@ def test_plan_is_only_created_and_never_applied_before_approval(tmp_path) -> Non
     plan = UpgradePlanner(FakeAI(payload), CodebaseAnalyzer(tmp_path)).create_plan("Add a safe label to the workspace")
     assert plan.affected_files == ["apps/web/src/features/safe.tsx"]
 
+def test_valid_unified_patch_is_accepted() -> None:
+    assert patch_paths(PATCH) == ["apps/web/src/features/safe.tsx"]
+
+def test_malformed_unified_patch_is_rejected_before_git_apply(tmp_path) -> None:
+    corrupt_patch = PATCH.replace("@@ -1 +1 @@", "@@ -1,2 +1 @@")
+    runner = FakeRunner()
+    with pytest.raises(UpgradeSafetyError, match="hunk line counts"):
+        GitUpgradeRepository(tmp_path, runner).apply(corrupt_patch)
+    assert not (tmp_path / ".ultron-upgrade.patch").exists()
+    assert not any(call[:2] == ["git", "apply"] for call in runner.calls)
+
+def test_affected_files_mismatch_is_rejected(tmp_path) -> None:
+    payload = json.dumps({"plan":"Add a safe label.", "risk":"low", "affected_files":["apps/web/src/other.tsx"], "patch":PATCH})
+    with pytest.raises(UpgradeSafetyError, match="affected-file list"):
+        UpgradePlanner(FakeAI(payload), CodebaseAnalyzer(tmp_path)).create_plan("Add a safe label")
+
 def test_protected_files_are_rejected() -> None:
     secret_patch = PATCH.replace("apps/web/src/features/safe.tsx", ".env")
     with pytest.raises(UpgradeSafetyError): patch_paths(secret_patch)

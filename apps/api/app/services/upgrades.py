@@ -24,6 +24,7 @@ PROTECTED_PATHS = {
     "apps/api/app/api/mvp.py", "apps/api/app/api/upgrades.py", "apps/api/app/services/upgrades.py",
 }
 BLOCKED_PARTS = {".git", "node_modules", ".next", "__pycache__", ".venv", "venv"}
+HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$")
 
 
 class UpgradeSafetyError(RuntimeError):
@@ -65,11 +66,78 @@ def validate_upgrade_path(path: str) -> str:
     return normalized
 
 
+def validate_unified_diff(patch: str) -> None:
+    """Reject structurally corrupt diffs before they reach ``git apply``.
+
+    Git's parser accepts a broad patch format, but a generated patch must at
+    least have complete file headers and hunks whose stated line counts match
+    their bodies.  This catches the common LLM failure mode (bad hunk counts)
+    without changing the repository's existing apply/checkpoint safeguards.
+    """
+    lines = patch.splitlines()
+    position = 0
+    files = 0
+
+    while position < len(lines):
+        if not lines[position].startswith("diff --git "):
+            raise UpgradeSafetyError("Malformed unified diff: each file must begin with a Git diff header.")
+        files += 1
+        position += 1
+
+        saw_old, saw_new, saw_hunk = False, False, False
+        while position < len(lines) and not lines[position].startswith("diff --git "):
+            line = lines[position]
+            if line.startswith("--- "):
+                if saw_old or saw_new:
+                    raise UpgradeSafetyError("Malformed unified diff: duplicate file headers.")
+                saw_old = True
+            elif line.startswith("+++ "):
+                if not saw_old or saw_new:
+                    raise UpgradeSafetyError("Malformed unified diff: invalid file-header order.")
+                saw_new = True
+            elif line.startswith("@@"):
+                if not (saw_old and saw_new):
+                    raise UpgradeSafetyError("Malformed unified diff: hunk is missing file headers.")
+                match = HUNK_HEADER.fullmatch(line)
+                if not match:
+                    raise UpgradeSafetyError("Malformed unified diff: invalid hunk header.")
+                old_expected = int(match.group(2) or 1)
+                new_expected = int(match.group(4) or 1)
+                old_actual = new_actual = 0
+                position += 1
+                while position < len(lines) and not lines[position].startswith(("diff --git ", "@@")):
+                    body_line = lines[position]
+                    if body_line.startswith("\\ No newline at end of file"):
+                        position += 1
+                        continue
+                    if not body_line.startswith((" ", "+", "-")):
+                        raise UpgradeSafetyError("Malformed unified diff: invalid hunk line.")
+                    if body_line[0] in " -":
+                        old_actual += 1
+                    if body_line[0] in " +":
+                        new_actual += 1
+                    position += 1
+                if (old_actual, new_actual) != (old_expected, new_expected):
+                    raise UpgradeSafetyError(
+                        "Malformed unified diff: hunk line counts do not match its header."
+                    )
+                saw_hunk = True
+                continue
+            position += 1
+
+        if not (saw_old and saw_new and saw_hunk):
+            raise UpgradeSafetyError("Malformed unified diff: each file requires headers and at least one hunk.")
+
+    if not files:
+        raise UpgradeSafetyError("Malformed unified diff: no file changes were found.")
+
+
 def patch_paths(patch: str) -> list[str]:
     if not patch or len(patch.encode()) > MAX_PATCH_BYTES:
         raise UpgradeSafetyError("A non-empty, reasonably sized patch is required.")
     if re.search(r"(?i)(api[_-]?key|secret|password|token)\s*[:=]", patch):
         raise UpgradeSafetyError("The proposed patch appears to contain a credential and was rejected.")
+    validate_unified_diff(patch)
     paths: list[str] = []
     for line in patch.splitlines():
         if line.startswith("diff --git "):
