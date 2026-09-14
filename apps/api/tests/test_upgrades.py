@@ -16,6 +16,14 @@ PATCH = """diff --git a/apps/web/src/features/safe.tsx b/apps/web/src/features/s
 +new
 """
 
+MULTI_FILE_PATCH = PATCH + """diff --git a/apps/api/tests/safe_test.py b/apps/api/tests/safe_test.py
+--- a/apps/api/tests/safe_test.py
++++ b/apps/api/tests/safe_test.py
+@@ -1 +1 @@
+-old test
++new test
+"""
+
 class FakeAI:
     def __init__(self, response: str): self.response = response
     def respond(self, messages: list[ChatTurn]) -> str: return self.response
@@ -48,6 +56,20 @@ def test_plan_is_only_created_and_never_applied_before_approval(tmp_path) -> Non
 def test_valid_unified_patch_is_accepted() -> None:
     assert patch_paths(PATCH) == ["apps/web/src/features/safe.tsx"]
 
+def test_valid_multi_file_unified_patch_is_accepted() -> None:
+    assert patch_paths(MULTI_FILE_PATCH) == ["apps/web/src/features/safe.tsx", "apps/api/tests/safe_test.py"]
+
+def test_generated_patch_without_git_diff_header_is_rejected(tmp_path) -> None:
+    headerless_patch = PATCH.split("\n", 1)[1]
+    payload = json.dumps({"plan":"Add a safe label.", "risk":"low", "affected_files":["apps/web/src/features/safe.tsx"], "patch":headerless_patch})
+    with pytest.raises(UpgradeSafetyError, match="Git diff header"):
+        UpgradePlanner(FakeAI(payload), CodebaseAnalyzer(tmp_path)).create_plan("Add a safe label")
+
+def test_invalid_hunk_header_is_rejected() -> None:
+    malformed_patch = PATCH.replace("@@ -1 +1 @@", "@@ -1,1 +1,1")
+    with pytest.raises(UpgradeSafetyError, match="invalid hunk header"):
+        patch_paths(malformed_patch)
+
 def test_malformed_unified_patch_is_rejected_before_git_apply(tmp_path) -> None:
     corrupt_patch = PATCH.replace("@@ -1 +1 @@", "@@ -1,2 +1 @@")
     runner = FakeRunner()
@@ -55,6 +77,12 @@ def test_malformed_unified_patch_is_rejected_before_git_apply(tmp_path) -> None:
         GitUpgradeRepository(tmp_path, runner).apply(corrupt_patch)
     assert not (tmp_path / ".ultron-upgrade.patch").exists()
     assert not any(call[:2] == ["git", "apply"] for call in runner.calls)
+
+def test_truncated_or_invalid_hunk_body_is_rejected() -> None:
+    with pytest.raises(UpgradeSafetyError, match="truncated"):
+        patch_paths(PATCH.rstrip("\n"))
+    with pytest.raises(UpgradeSafetyError, match="invalid hunk line"):
+        patch_paths(PATCH.replace("+new", "new"))
 
 def test_affected_files_mismatch_is_rejected(tmp_path) -> None:
     payload = json.dumps({"plan":"Add a safe label.", "risk":"low", "affected_files":["apps/web/src/other.tsx"], "patch":PATCH})

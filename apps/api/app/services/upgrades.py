@@ -74,13 +74,21 @@ def validate_unified_diff(patch: str) -> None:
     their bodies.  This catches the common LLM failure mode (bad hunk counts)
     without changing the repository's existing apply/checkpoint safeguards.
     """
+    if not patch.endswith("\n"):
+        raise UpgradeSafetyError("Malformed unified diff: patch is truncated (missing final newline).")
     lines = patch.splitlines()
     position = 0
     files = 0
 
     while position < len(lines):
-        if not lines[position].startswith("diff --git "):
-            raise UpgradeSafetyError("Malformed unified diff: each file must begin with a Git diff header.")
+        header = lines[position].split()
+        if len(header) != 4 or header[:2] != ["diff", "--git"] or not header[2].startswith("a/") or not header[3].startswith("b/"):
+            raise UpgradeSafetyError("Malformed unified diff: each file must begin with a valid Git diff header.")
+        old_path, new_path = header[2][2:], header[3][2:]
+        if not old_path or not new_path:
+            raise UpgradeSafetyError("Malformed unified diff: Git diff header has an empty path.")
+        if old_path != new_path:
+            raise UpgradeSafetyError("Malformed unified diff: renames and copies are not supported.")
         files += 1
         position += 1
 
@@ -90,10 +98,16 @@ def validate_unified_diff(patch: str) -> None:
             if line.startswith("--- "):
                 if saw_old or saw_new:
                     raise UpgradeSafetyError("Malformed unified diff: duplicate file headers.")
+                if line[4:].split("\t", 1)[0] not in {f"a/{old_path}", "/dev/null"}:
+                    raise UpgradeSafetyError("Malformed unified diff: old file header does not match Git diff header.")
                 saw_old = True
             elif line.startswith("+++ "):
                 if not saw_old or saw_new:
                     raise UpgradeSafetyError("Malformed unified diff: invalid file-header order.")
+                if line[4:].split("\t", 1)[0] not in {f"b/{new_path}", "/dev/null"}:
+                    raise UpgradeSafetyError("Malformed unified diff: new file header does not match Git diff header.")
+                if line[4:].split("\t", 1)[0] == "/dev/null" and lines[position - 1][4:].split("\t", 1)[0] == "/dev/null":
+                    raise UpgradeSafetyError("Malformed unified diff: both file headers cannot be /dev/null.")
                 saw_new = True
             elif line.startswith("@@"):
                 if not (saw_old and saw_new):
@@ -103,11 +117,17 @@ def validate_unified_diff(patch: str) -> None:
                     raise UpgradeSafetyError("Malformed unified diff: invalid hunk header.")
                 old_expected = int(match.group(2) or 1)
                 new_expected = int(match.group(4) or 1)
+                if old_expected == new_expected == 0:
+                    raise UpgradeSafetyError("Malformed unified diff: empty hunk.")
                 old_actual = new_actual = 0
+                previous_was_content = False
                 position += 1
                 while position < len(lines) and not lines[position].startswith(("diff --git ", "@@")):
                     body_line = lines[position]
-                    if body_line.startswith("\\ No newline at end of file"):
+                    if body_line == "\\ No newline at end of file":
+                        if not previous_was_content:
+                            raise UpgradeSafetyError("Malformed unified diff: misplaced no-newline marker.")
+                        previous_was_content = False
                         position += 1
                         continue
                     if not body_line.startswith((" ", "+", "-")):
@@ -116,6 +136,7 @@ def validate_unified_diff(patch: str) -> None:
                         old_actual += 1
                     if body_line[0] in " +":
                         new_actual += 1
+                    previous_was_content = True
                     position += 1
                 if (old_actual, new_actual) != (old_expected, new_expected):
                     raise UpgradeSafetyError(
@@ -123,6 +144,10 @@ def validate_unified_diff(patch: str) -> None:
                     )
                 saw_hunk = True
                 continue
+            elif saw_old or saw_new:
+                raise UpgradeSafetyError("Malformed unified diff: unexpected content between file headers and hunks.")
+            elif not line.startswith(("index ", "new file mode ", "deleted file mode ", "old mode ", "new mode ")):
+                raise UpgradeSafetyError("Malformed unified diff: unexpected Git file metadata.")
             position += 1
 
         if not (saw_old and saw_new and saw_hunk):
@@ -197,7 +222,7 @@ class UpgradePlanner:
         self.ai, self.analyzer = ai, analyzer or CodebaseAnalyzer()
 
     def create_plan(self, feature_request: str) -> UpgradePlan:
-        prompt = f"""You are ULTRON's constrained self-upgrade planner. Analyze the feature request and repository inventory below. Return ONLY JSON with string keys plan, risk, patch and array affected_files. risk must be low, medium, or high. patch must be a standard unified diff. Never modify .env, auth, security, database/migration, upgrade-engine, or API routing files. Never include secrets. If no safe patch is possible, use an empty patch and explain why in plan.\n\nFeature request:\n{feature_request}\n\nAllowed repository inventory:\n{self.analyzer.context()}"""
+        prompt = f"""You are ULTRON's constrained self-upgrade planner. Analyze the feature request and repository inventory below. Return ONLY JSON with string keys plan, risk, patch and array affected_files. risk must be low, medium, or high. patch must be a deterministic Git unified diff: for every changed file emit exactly `diff --git a/<path> b/<path>`, `--- a/<path>` (or `/dev/null`), and `+++ b/<path>` (or `/dev/null`) before its hunks. Every hunk must use `@@ -old_start,old_count +new_start,new_count @@` and its old/new counts must exactly match its `-`/`+`/context lines. Do not emit prose, markdown fences, ellipses, binary changes, renames, copies, or omitted/truncated hunks. End the patch with a newline. Never modify .env, auth, security, database/migration, upgrade-engine, or API routing files. Never include secrets. If no safe patch is possible, use an empty patch and explain why in plan.\n\nFeature request:\n{feature_request}\n\nAllowed repository inventory:\n{self.analyzer.context()}"""
         raw = self.ai.respond([ChatTurn(role="user", content=prompt)])
         try:
             content = raw.strip().removeprefix("```json").removesuffix("```").strip()
