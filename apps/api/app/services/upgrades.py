@@ -18,6 +18,8 @@ from .ai import ChatTurn, ConversationAIService
 
 MAX_PATCH_BYTES = 250_000
 MIN_GENERATED_PATCH_BYTES = 64
+INITIAL_CONTEXT_FILES = 12
+MAX_FILE_CONTEXT_BYTES = 24_000
 SAFE_PREFIXES = ("apps/api/app/", "apps/api/tests/", "apps/web/src/", "apps/web/tests/", "docs/")
 PROTECTED_PATHS = {
     ".env", ".env.example", "apps/api/app/config.py", "apps/api/app/database.py",
@@ -224,13 +226,35 @@ class CodebaseAnalyzer:
 
     def refreshed_file_context(self, paths: list[str]) -> str:
         """Read the current allowlisted files immediately before patch regeneration."""
+        return self._file_context(paths, MAX_FILE_CONTEXT_BYTES)
+
+    def initial_file_context(self, feature_request: str) -> str:
+        """Provide a bounded, relevant snapshot for the first patch proposal."""
+        terms = {term for term in re.findall(r"[a-z0-9_]+", feature_request.lower()) if len(term) > 2}
+        candidates = self.inventory()
+        ranked = sorted(
+            candidates,
+            key=lambda path: (-sum(term in path.lower() for term in terms), path),
+        )
+        return self._file_context(ranked[:INITIAL_CONTEXT_FILES], MAX_FILE_CONTEXT_BYTES)
+
+    def _file_context(self, paths: list[str], byte_limit: int) -> str:
         contents: list[str] = []
+        remaining = byte_limit
         for path in paths:
             normalized = validate_upgrade_path(path)
             candidate = self.root / normalized
             if not candidate.is_file() or candidate.stat().st_size > 40_000:
                 continue
-            contents.append(f"--- {normalized}\n{candidate.read_text(encoding='utf-8')}")
+            text = candidate.read_text(encoding="utf-8")
+            # Do not send a candidate that resembles a source-embedded credential.
+            if re.search(r"(?i)(api[_-]?key|secret|password|token)\s*[:=]", text):
+                continue
+            encoded = text.encode()
+            if len(encoded) > remaining:
+                continue
+            contents.append(f"--- {normalized}\n{text}")
+            remaining -= len(encoded)
         return "\n".join(contents)
 
 
@@ -239,7 +263,8 @@ class UpgradePlanner:
         self.ai, self.analyzer = ai, analyzer or CodebaseAnalyzer()
 
     def create_plan(self, feature_request: str) -> UpgradePlan:
-        prompt = f"""You are ULTRON's constrained self-upgrade planner. Analyze the feature request and repository inventory below. Return ONLY JSON with string keys plan, risk, patch and array affected_files. risk must be low, medium, or high. patch must be a deterministic Git unified diff: for every changed file emit exactly `diff --git a/<path> b/<path>`, `--- a/<path>` (or `/dev/null`), and `+++ b/<path>` (or `/dev/null`) before its hunks. Every hunk must use `@@ -old_start,old_count +new_start,new_count @@` and its old/new counts must exactly match its `-`/`+`/context lines. Do not emit prose, markdown fences, ellipses, binary changes, renames, copies, or omitted/truncated hunks. End the patch with a newline. Never modify .env, auth, security, database/migration, upgrade-engine, or API routing files. Never include secrets. If no safe patch is possible, use an empty patch and explain why in plan.\n\nFeature request:\n{feature_request}\n\nAllowed repository inventory:\n{self.analyzer.context()}"""
+        initial_context = self.analyzer.initial_file_context(feature_request)
+        prompt = f"""You are ULTRON's constrained self-upgrade planner. Analyze the feature request, repository inventory, and current contents of relevant allowlisted files below. Return ONLY JSON with string keys plan, risk, patch and array affected_files. risk must be low, medium, or high. Base patch context lines on the supplied current file contents. patch must be a deterministic Git unified diff: for every changed file emit exactly `diff --git a/<path> b/<path>`, `--- a/<path>` (or `/dev/null`), and `+++ b/<path>` (or `/dev/null`) before its hunks. Every hunk must use `@@ -old_start,old_count +new_start,new_count @@` and its old/new counts must exactly match its `-`/`+`/context lines. Do not emit prose, markdown fences, ellipses, binary changes, renames, copies, or omitted/truncated hunks. End the patch with a newline. Never modify .env, auth, security, database/migration, upgrade-engine, or API routing files. Never include secrets. If no safe patch is possible, use an empty patch and explain why in plan.\n\nFeature request:\n{feature_request}\n\nAllowed repository inventory:\n{self.analyzer.context()}\n\nCurrent relevant file contents:\n{initial_context}"""
         raw = self.ai.respond([ChatTurn(role="user", content=prompt)])
         plan = self._parse_plan(raw)
         if plan.risk not in {"low", "medium", "high"}:
@@ -279,7 +304,7 @@ class UpgradePlanner:
             return UpgradePlan(
                 plan=redact_text(str(value["plan"]))[:8000],
                 affected_files=[validate_upgrade_path(str(p)) for p in value["affected_files"]],
-                risk=str(value.get("risk", "medium")).lower(),
+                risk=str(value.get("risk", "medium")).strip().lower(),
                 patch=str(value.get("patch", "")),
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:

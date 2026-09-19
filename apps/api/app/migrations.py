@@ -7,7 +7,7 @@ here before changing persistent models in future phases.
 from sqlalchemy import Column, Integer, MetaData, Table, select
 from .database import Base, engine
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 metadata = MetaData()
 versions = Table("schema_migrations", metadata, Column("version", Integer, primary_key=True))
 

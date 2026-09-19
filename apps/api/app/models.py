@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 from .database import Base
 
@@ -139,3 +139,45 @@ class UpgradeEvent(Base):
     status: Mapped[str] = mapped_column(String(32))
     message: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TradingSession(Base, Timestamped):
+    __tablename__ = "trading_sessions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    mode: Mapped[str] = mapped_column(String(16), default="PAPER")
+    balance: Mapped[float] = mapped_column(Float, default=10000.0)
+    equity: Mapped[float] = mapped_column(Float, default=10000.0)
+    kill_switch: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class Instrument(Base):
+    __tablename__ = "instruments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    asset_class: Mapped[str] = mapped_column(String(24), default="SIMULATED")
+
+
+class MarketData(Base):
+    __tablename__ = "market_data"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    instrument_id: Mapped[int] = mapped_column(ForeignKey("instruments.id"), index=True)
+    timeframe: Mapped[str] = mapped_column(String(8), index=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    open: Mapped[float] = mapped_column(Float); high: Mapped[float] = mapped_column(Float)
+    low: Mapped[float] = mapped_column(Float); close: Mapped[float] = mapped_column(Float)
+    volume: Mapped[float] = mapped_column(Float)
+
+
+class Trade(Base, Timestamped):
+    __tablename__ = "trades"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("trading_sessions.id"), index=True)
+    decision_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    strategy: Mapped[str] = mapped_column(String(48)); direction: Mapped[str] = mapped_column(String(8))
+    entry: Mapped[float] = mapped_column(Float); stop_loss: Mapped[float] = mapped_column(Float); take_profit: Mapped[float] = mapped_column(Float)
+    quantity: Mapped[float] = mapped_column(Float); status: Mapped[str] = mapped_column(String(16), default="OPEN")
+    exit_price: Mapped[float | None] = mapped_column(Float, nullable=True); pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    rationale: Mapped[str] = mapped_column(Text, default="")

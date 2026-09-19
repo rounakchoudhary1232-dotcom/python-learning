@@ -5,7 +5,7 @@ from ..database import get_db
 from ..models import Upgrade, UpgradeEvent, User
 from ..schemas import RollbackIn, UpgradeDecisionIn, UpgradeRequestIn
 from ..security import audit, current_user
-from ..services.ai import ConversationAIService, get_ai_service
+from ..services.ai import AIProviderNotConfigured, AIProviderUnavailable, ConversationAIService, get_ai_service
 from ..services.upgrades import (GitUpgradeRepository, UpgradeExecutionError, UpgradeExecutor, UpgradePlanner, UpgradeSafetyError)
 
 router = APIRouter(prefix="/upgrades", tags=["upgrades"])
@@ -39,6 +39,8 @@ def propose_upgrade(payload: UpgradeRequestIn, user: User = Depends(current_user
         plan = UpgradePlanner(ai).create_plan(payload.feature_request.strip())
     except UpgradeSafetyError as exc:
         raise HTTPException(422, str(exc))
+    except (AIProviderNotConfigured, AIProviderUnavailable):
+        raise HTTPException(503, "AI providers are temporarily unavailable. Please try again.")
     upgrade = Upgrade(user_id=user.id, feature_request=payload.feature_request.strip(), plan=plan.plan, affected_files=json.dumps(plan.affected_files), risk=plan.risk, patch=plan.patch)
     db.add(upgrade); db.commit(); db.refresh(upgrade)
     event(db, upgrade, "proposed", "Proposal created. No code has been changed; explicit approval is required.")

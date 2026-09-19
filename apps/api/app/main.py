@@ -3,7 +3,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from .api import health_router, mvp_router, upgrades_router
+from .api import health_router, mvp_router, trading_router, upgrades_router
 from .config import get_settings
 from .migrations import upgrade_database
 from .logging import configure_logging
@@ -34,3 +34,4 @@ async def request_id_middleware(request: Request, call_next: Callable[[Request],
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(mvp_router, prefix="/api/v1")
 app.include_router(upgrades_router, prefix="/api/v1")
+app.include_router(trading_router, prefix="/api/v1")

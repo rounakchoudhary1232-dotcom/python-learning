@@ -61,6 +61,28 @@ def test_plan_is_only_created_and_never_applied_before_approval(tmp_path) -> Non
     plan = UpgradePlanner(FakeAI(payload), CodebaseAnalyzer(tmp_path)).create_plan("Add a safe label to the workspace")
     assert plan.affected_files == ["apps/web/src/features/safe.tsx"]
 
+def test_initial_planner_uses_current_relevant_file_context(tmp_path) -> None:
+    target = tmp_path / "apps/web/src/features/status-indicator.tsx"
+    target.parent.mkdir(parents=True)
+    target.write_text("export const StatusIndicator = () => 'current';\n", encoding="utf-8")
+    payload = json.dumps({"plan":"Update status.", "risk":"low", "affected_files":["apps/web/src/features/safe.tsx"], "patch":PATCH})
+    ai = SequencedFakeAI([payload])
+
+    UpgradePlanner(ai, CodebaseAnalyzer(tmp_path)).create_plan("Update the status indicator")
+
+    assert "--- apps/web/src/features/status-indicator.tsx\nexport const StatusIndicator = () => 'current';" in ai.messages[0][0].content
+
+@pytest.mark.parametrize(("generated_risk", "expected"), [("low", "low"), (" Medium ", "medium"), ("HIGH\n", "high")])
+def test_valid_generated_risk_levels_are_normalized(generated_risk, expected, tmp_path) -> None:
+    payload = json.dumps({"plan":"Add a safe label.", "risk":generated_risk, "affected_files":["apps/web/src/features/safe.tsx"], "patch":PATCH})
+    plan = UpgradePlanner(FakeAI(payload), CodebaseAnalyzer(tmp_path)).create_plan("Add a safe label to the workspace")
+    assert plan.risk == expected
+
+def test_invalid_generated_risk_level_is_rejected(tmp_path) -> None:
+    payload = json.dumps({"plan":"Add a safe label.", "risk":"critical", "affected_files":["apps/web/src/features/safe.tsx"], "patch":PATCH})
+    with pytest.raises(UpgradeSafetyError, match="invalid risk level"):
+        UpgradePlanner(FakeAI(payload), CodebaseAnalyzer(tmp_path)).create_plan("Add a safe label to the workspace")
+
 @pytest.mark.parametrize("incomplete_patch", ["", " \t ", "+x\n", PATCH.rstrip("\n")], ids=["empty", "whitespace", "too-small", "truncated"])
 def test_incomplete_generated_patch_is_regenerated(incomplete_patch, tmp_path) -> None:
     invalid = json.dumps({"plan":"Add a safe label.", "risk":"low", "affected_files":["apps/web/src/features/safe.tsx"], "patch":incomplete_patch})
