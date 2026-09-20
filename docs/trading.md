@@ -21,3 +21,9 @@ Simulated market data -> indicators/features -> regime + strategy signal
 The default `DATA_PROVIDER=simulated` uses deterministic development candles and is never presented as live data. A future data provider implements `MarketDataProvider`; a future broker would require a distinct, deliberately designed live safety boundary.
 
 Safe configuration defaults are in `.env.example`: `TRADING_MODE=PAPER`, a 1% per-trade risk cap, 3% daily loss cap, five daily trades, 0.60 minimum confidence, and 1.5 minimum risk/reward. Backtest results are research measurements, not proof of future performance.
+
+## Phase 2 strategy intelligence
+
+Phase 2 is read-only: `MarketContext → regime compatibility → strategy registry → evaluation → normalized signal`. It has no broker, order, position, provider, database, or risk-control side effects. The five registered strategies are trend following (trending regimes), momentum (directional/high-volatility regimes), breakout (trend/volatility conditions), mean reversion (range/low-volatility), and volatility breakout (volatility regimes).
+
+Every signal contains `strategy_name`, `signal` (`BUY`, `SELL`, `HOLD`, or `REJECT`), `score`, `evidence`, `regime_compatible`, and relevant `factors`. `score` is deterministic evidence strength only: it is not a probability, guaranteed win rate, profitability claim, or execution instruction. Existing PAPER approval, kill-switch, and risk controls remain the execution boundary.
