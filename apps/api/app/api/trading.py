@@ -4,7 +4,7 @@ from ..config import get_settings
 from ..database import get_db
 from ..models import Trade, TradingSession, User
 from ..security import current_user
-from ..services.trading import SimulatedMarketDataProvider, backtest, make_decision
+from ..services.trading import CandleRepository, SimulatedMarketDataProvider, analyze_market, backtest, make_decision
 
 router = APIRouter(prefix="/trading", tags=["trading"])
 
@@ -28,6 +28,14 @@ def trading_status(user: User = Depends(current_user), db: Session = Depends(get
 def propose(symbol: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
     session = session_for(db, user); candles = SimulatedMarketDataProvider().candles(symbol, "5m")
     return make_decision(symbol, "5m", candles, session.balance, rules(session)).payload() | {"data_provider": "SIMULATED", "paper_only": True}
+
+@router.get("/market-context/{symbol}")
+def market_context(symbol: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    provider = SimulatedMarketDataProvider()
+    repository = CandleRepository(db)
+    for timeframe in ("1m", "5m", "1h"):
+        repository.save(provider.candles(symbol, timeframe))
+    return analyze_market(symbol, "5m", repository.recent(symbol, "5m"), repository.recent(symbol, "1m"), repository.recent(symbol, "1h")).payload() | {"data_provider": "SIMULATED", "paper_only": True}
 
 @router.post("/paper/execute/{symbol}", status_code=status.HTTP_201_CREATED)
 def paper_execute(symbol: str, user: User = Depends(current_user), db: Session = Depends(get_db)):

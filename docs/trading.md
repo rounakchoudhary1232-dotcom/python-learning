@@ -2,6 +2,14 @@
 
 ULTRON's trading module is **PAPER only**. It has no broker adapter, live-order endpoint, or broker credential configuration.
 
+## Phase 1 market intelligence
+
+`MarketContext` is a read-only, serializable analysis result built from validated OHLCV candles. Candles must have finite values, valid OHLC ranges, non-negative volume, and strictly ordered unique timestamps. The current simulated provider includes symbol and timeframe on every candle and is explicitly labelled `SIMULATED`.
+
+The analysis flow is: validated candles → EMA/RSI/ATR features → swing highs/lows → HH/HL/LH/LL structure, BOS and CHOCH evidence → nearest support/resistance → volatility state → breakout/reversal evidence → multi-timeframe summary → regime. Structure is descriptive evidence, not a prediction. Volatility states are `LOW`, `NORMAL`, `HIGH`, and `EXTREME`; regimes are `TRENDING_BULL`, `TRENDING_BEAR`, `RANGE`, `HIGH_VOLATILITY`, `LOW_VOLATILITY`, or `UNCLEAR`.
+
+`GET /api/v1/trading/market-context/{symbol}` is authenticated and read-only. It returns the complete context and never executes a trade. For the simulated provider, 1h/5m/1m deterministic series supply higher/trading/lower timeframe analysis. Real providers must return actual data; missing data is reported as invalid/insufficient rather than fabricated.
+
 ```text
 Simulated market data -> indicators/features -> regime + strategy signal
                          -> deterministic risk/kill-switch check -> paper trade journal

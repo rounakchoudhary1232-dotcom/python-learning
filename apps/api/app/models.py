@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 from .database import Base
 
@@ -160,6 +160,7 @@ class Instrument(Base):
 
 class MarketData(Base):
     __tablename__ = "market_data"
+    __table_args__ = (UniqueConstraint("instrument_id", "timeframe", "timestamp", name="uq_market_data_candle"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     instrument_id: Mapped[int] = mapped_column(ForeignKey("instruments.id"), index=True)
     timeframe: Mapped[str] = mapped_column(String(8), index=True)
