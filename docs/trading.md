@@ -27,3 +27,21 @@ Safe configuration defaults are in `.env.example`: `TRADING_MODE=PAPER`, a 1% pe
 Phase 2 is read-only: `MarketContext → regime compatibility → strategy registry → evaluation → normalized signal`. It has no broker, order, position, provider, database, or risk-control side effects. The five registered strategies are trend following (trending regimes), momentum (directional/high-volatility regimes), breakout (trend/volatility conditions), mean reversion (range/low-volatility), and volatility breakout (volatility regimes).
 
 Every signal contains `strategy_name`, `signal` (`BUY`, `SELL`, `HOLD`, or `REJECT`), `score`, `evidence`, `regime_compatible`, and relevant `factors`. `score` is deterministic evidence strength only: it is not a probability, guaranteed win rate, profitability claim, or execution instruction. Existing PAPER approval, kill-switch, and risk controls remain the execution boundary.
+
+## Phase 3 decision engine
+
+The read-only Decision Engine aggregates compatible Phase 2 signals into one `BUY`, `SELL`, `HOLD`, or `REJECT` intelligence result. Its deterministic pipeline validates context and PAPER/kill-switch constraints, aggregates compatible directional evidence, detects conflicts, applies MTF alignment or conflict adjustment, checks the bounded evidence score against configuration, and validates expected R:R when valid levels exist. It returns entry, stop, target and R:R only when determinable.
+
+Confidence is an explainable 0.0–1.0 evidence score, not a guaranteed probability or profitability claim. The engine never orders, changes balances or positions, or bypasses risk. Risk and paper execution remain separate authoritative boundaries.
+
+## Phase 4 risk and paper-execution safety
+
+`Decision → Risk Assessment → Paper Execution` keeps safety authoritative. Risk assessment validates PAPER mode, kill switch, valid directional SL/TP, R:R, sizing (`equity × max_risk_per_trade / abs(entry - stop)`), daily loss, trade count, drawdown, exposure, consecutive losses, duplicate positions, and available timestamp freshness. Rejections are explicit and no strategy or AI/LLM result can override them. This phase does not enable live trading or a broker.
+
+## Phase 5 paper monitoring
+
+Paper positions can be monitored through `POST /api/v1/trading/paper/monitor/{symbol}`. It only checks existing PAPER positions against the current simulated closing price and closes SL/TP exits deterministically. BUY P&L is `(exit - entry) × quantity`; SELL P&L is `(entry - exit) × quantity`. The kill switch blocks entries but not protective exits. There is no broker, daemon, tick ordering, fee, or slippage model; an intrabar candle that reaches both levels must be treated conservatively as SL first. Phase 5 does not enable live trading.
+
+## Phase 6 backtesting research
+
+`BacktestEngine` is a PAPER/RESEARCH-only chronological simulator. It validates historical candles, derives each signal from candles available through N, and enters only at N+1 open. SL is checked before TP when both touch in one OHLC candle. Fees and slippage are deterministic configuration rates; zero-cost runs are explicitly warned. Results include trades, an equity curve, net P&L, drawdown, profit factor, expectancy, average R, and small-sample warnings. Backtest results are historical simulations and do not guarantee future performance. Win rate alone is not sufficient to evaluate a strategy.
