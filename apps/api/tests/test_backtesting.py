@@ -7,6 +7,7 @@ def test_backtest_is_deterministic_research_only_and_validates_input():
  c=SimulatedMarketDataProvider().candles("SPY","5m",60);a=BacktestEngine().run("SPY","5m",c);b=BacktestEngine().run("SPY","5m",c)
  assert a.payload()==b.payload() and a.paper_only and a.research_only and a.valid
  assert not BacktestEngine().run("SPY","5m",c[:5]).valid
+ assert a.data_quality and a.data_quality["valid"]
 def test_next_open_entries_and_zero_cost_warning():
  r=BacktestEngine().run("SPY","5m",SimulatedMarketDataProvider().candles("SPY","5m",60),BacktestConfig())
  assert "zero-cost simulation" in r.warnings
@@ -31,8 +32,8 @@ def test_historical_split_is_chronological_deterministic_and_safe():
  with pytest.raises(ValueError):split_historical_candles(candles[:1],.8)
 def test_split_backtest_keeps_in_sample_isolated_from_later_candles():
  candles=SimulatedMarketDataProvider().candles("SPY","5m",120);config=BacktestConfig(split_ratio=.8);first=BacktestEngine().run("SPY","5m",candles,config)
- changed=list(candles);changed[-1]=changed[-1].__class__(changed[-1].timestamp,changed[-1].open,changed[-1].high,changed[-1].low,changed[-1].close+10,changed[-1].volume,changed[-1].symbol,changed[-1].timeframe);second=BacktestEngine().run("SPY","5m",changed,config)
- assert first.split_ratio==.8 and first.in_sample==second.in_sample and first.out_of_sample
+ changed=list(candles);last=changed[-1];changed[-1]=last.__class__(last.timestamp,last.open,max(last.high,last.close+10),last.low,last.close+10,last.volume,last.symbol,last.timeframe);second=BacktestEngine().run("SPY","5m",changed,config)
+ assert first.split_ratio==.8 and first.in_sample==second.in_sample and first.out_of_sample and first.data_quality and first.data_quality["valid"]
 def test_walk_forward_windows_are_chronological_and_deterministic():
  candles=SimulatedMarketDataProvider().candles("SPY","5m",20);windows=walk_forward_windows(candles,WalkForwardConfig(10,5,5))
  assert len(windows)==2 and windows[0][0][-1].timestamp<windows[0][1][0].timestamp and windows==walk_forward_windows(candles,WalkForwardConfig(10,5,5))

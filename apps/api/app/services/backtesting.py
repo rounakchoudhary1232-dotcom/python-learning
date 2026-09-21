@@ -8,6 +8,7 @@ from .strategies import StrategyEvaluator
 from .decision_engine import DecisionConstraints, DecisionEngine
 from .risk_engine import AccountRiskState, RiskLimits, assess
 from .execution_costs import ExecutionCostConfig, ExecutionCostModel
+from .data_quality import DataQualityConfig, validate_historical_data
 
 def split_historical_candles(candles:list[Candle], split_ratio:float, minimum:int=2)->tuple[list[Candle],list[Candle]]:
     """Return chronological copies for future IS/OOS research; never mutates input."""
@@ -28,7 +29,7 @@ def walk_forward_windows(candles:list[Candle],config:WalkForwardConfig)->list[tu
 
 @dataclass(frozen=True)
 class BacktestConfig:
-    initial_balance: float = 10000.; fee_rate: float = 0.; slippage_rate: float = 0.; minimum_history: int = 20; split_ratio: float | None = None; execution_costs: ExecutionCostConfig = ExecutionCostConfig()
+    initial_balance: float = 10000.; fee_rate: float = 0.; slippage_rate: float = 0.; minimum_history: int = 20; split_ratio: float | None = None; execution_costs: ExecutionCostConfig = ExecutionCostConfig(); data_quality: DataQualityConfig = DataQualityConfig()
 @dataclass(frozen=True)
 class BacktestTrade:
     direction:str; entry_timestamp:str; entry:float; stop_loss:float; take_profit:float; quantity:float; exit_timestamp:str; exit_price:float; exit_reason:str; gross_pnl:float; fees:float; net_pnl:float; r_multiple:float; entry_reference_price:float|None=None; exit_reference_price:float|None=None; entry_fee:float=0.; exit_fee:float=0.; total_execution_cost:float=0.
@@ -37,7 +38,7 @@ class EquityPoint:
     timestamp:str; balance:float; drawdown:float
 @dataclass(frozen=True)
 class BacktestResult:
-    symbol:str; timeframe:str; valid:bool; errors:list[str]; trades:list[BacktestTrade]; equity_curve:list[EquityPoint]; metrics:dict; warnings:list[str]; strategy_research:list[dict]; strategy_statistics:dict; regime_statistics:dict; in_sample:dict|None=None; out_of_sample:dict|None=None; split_ratio:float|None=None; walk_forward_results:list[dict]|None=None; paper_only:bool=True; research_only:bool=True
+    symbol:str; timeframe:str; valid:bool; errors:list[str]; trades:list[BacktestTrade]; equity_curve:list[EquityPoint]; metrics:dict; warnings:list[str]; strategy_research:list[dict]; strategy_statistics:dict; regime_statistics:dict; in_sample:dict|None=None; out_of_sample:dict|None=None; split_ratio:float|None=None; walk_forward_results:list[dict]|None=None; paper_only:bool=True; research_only:bool=True; data_quality:dict|None=None
     def payload(self)->dict:return asdict(self)
 
 class BacktestEngine:
@@ -45,13 +46,15 @@ class BacktestEngine:
     def __init__(self,evaluator:StrategyEvaluator|None=None,decision_engine:DecisionEngine|None=None): self.evaluator=evaluator or StrategyEvaluator();self.decision_engine=decision_engine or DecisionEngine(self.evaluator)
     def run(self,symbol:str,timeframe:str,candles:list[Candle],config:BacktestConfig=BacktestConfig())->BacktestResult:
         if config.split_ratio is not None:
+            quality=validate_historical_data(candles,_quality_config(config))
+            if not quality.valid:return _quality_failure(symbol,timeframe,quality)
             ins,oos=split_historical_candles(candles,config.split_ratio)
-            base=BacktestConfig(config.initial_balance,config.fee_rate,config.slippage_rate,config.minimum_history,execution_costs=config.execution_costs)
+            base=BacktestConfig(config.initial_balance,config.fee_rate,config.slippage_rate,config.minimum_history,execution_costs=config.execution_costs,data_quality=config.data_quality)
             result=self.run(symbol,timeframe,ins,base)
             oos_result=self.run(symbol,timeframe,oos,base)
-            return BacktestResult(result.symbol,result.timeframe,result.valid,result.errors,result.trades,result.equity_curve,result.metrics,result.warnings,result.strategy_research,result.strategy_statistics,result.regime_statistics,result.payload(),oos_result.payload(),config.split_ratio)
-        valid,errors=validate_candles(candles,config.minimum_history)
-        if not valid:return BacktestResult(symbol,timeframe,False,errors,[],[],{},["historical input rejected"],[],{}, {})
+            return BacktestResult(symbol=result.symbol,timeframe=result.timeframe,valid=result.valid,errors=result.errors,trades=result.trades,equity_curve=result.equity_curve,metrics=result.metrics,warnings=result.warnings,strategy_research=result.strategy_research,strategy_statistics=result.strategy_statistics,regime_statistics=result.regime_statistics,in_sample=result.payload(),out_of_sample=oos_result.payload(),split_ratio=config.split_ratio,paper_only=result.paper_only,research_only=result.research_only,data_quality=quality.payload())
+        quality=validate_historical_data(candles,_quality_config(config))
+        if not quality.valid:return _quality_failure(symbol,timeframe,quality)
         balance,peak=config.initial_balance,config.initial_balance; trades=[]; curve=[]; research=[]
         # Pure deterministic research signal: previous close direction; no future values are read.
         for n in range(config.minimum_history,len(candles)-1):
@@ -86,7 +89,7 @@ class BacktestEngine:
             trade=trades[point["closed_trade_index"]]
             for name in point["decision"].get("selected_strategies",[]):strategy_groups.setdefault(name,[]).append(trade)
             regime_groups.setdefault(point["regime"],[]).append(trade)
-        return BacktestResult(symbol,timeframe,True,[],trades,curve,metrics,warnings,research,{k:_statistics(v) for k,v in strategy_groups.items()},{k:_statistics(v) for k,v in regime_groups.items()})
+        return BacktestResult(symbol,timeframe,True,[],trades,curve,metrics,warnings+[item["message"] for item in quality.warnings],research,{k:_statistics(v) for k,v in strategy_groups.items()},{k:_statistics(v) for k,v in regime_groups.items()},data_quality=quality.payload())
 
     def walk_forward(self,symbol:str,timeframe:str,candles:list[Candle],config:WalkForwardConfig,backtest_config:BacktestConfig=BacktestConfig())->list[dict]:
         windows=walk_forward_windows(candles,config)
@@ -123,3 +126,8 @@ def _cost_config(config):
     """Use the new model while honoring legacy fee/slippage config fields."""
     if config.execution_costs != ExecutionCostConfig(): return config.execution_costs
     return ExecutionCostConfig(config.fee_rate,config.slippage_rate*10_000)
+def _quality_config(config):
+    """BacktestConfig.minimum_history remains the public backtest history requirement."""
+    return DataQualityConfig(minimum_history=config.minimum_history,expected_timeframe=config.data_quality.expected_timeframe,strict_gaps=config.data_quality.strict_gaps)
+def _quality_failure(symbol,timeframe,quality):
+    return BacktestResult(symbol,timeframe,False,[item["message"] for item in quality.errors],[],[],{},["historical input rejected"]+[item["message"] for item in quality.warnings],[],{}, {},data_quality=quality.payload())
