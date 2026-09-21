@@ -63,3 +63,7 @@ Backtests now use that cost model after candle OHLC determines an SL/TP trigger:
 ## Phase 7.3 historical data quality
 
 Historical OHLCV is validated before research simulation: timestamps must be ordered and unique; OHLC relationships and finite positive prices are required; negative volume is fatal and zero volume is a warning. Optional timeframe checks report gaps as warnings by default (or errors in strict mode), because normal session breaks are not automatically corruption. Minimum history and empty datasets fail deterministically, and the serializable quality report is retained with the backtest result.
+
+## Phase 7.4 stress testing
+
+The research-only stress harness runs compact deterministic fixtures through the existing backtest pipeline, covering extreme ranges, price gaps, losing/drawdown conditions, both-level candles, high costs, zero volume, timeframe gaps, position-size edges, and risk limits. Results retain trade counts, risk rejections, P&L, execution costs, drawdown, and deterministic reasons. Passing a stress scenario is not evidence of profitability or live-trading readiness.
