@@ -55,3 +55,7 @@ Each complete walk-forward test window is now executed through the existing `Bac
 ## Phase 7 execution-cost model
 
 The reusable research cost model applies deterministic adverse slippage to execution prices and fees to executed notional (`price × quantity × fee_rate`), with an optional minimum fee. BUY entries and SELL exits slip upward; BUY exits and SELL entries slip downward. It is a simulation utility only: it has no broker, live execution, or external-account integration.
+
+## Phase 7.2 realistic backtest fills
+
+Backtests now use that cost model after candle OHLC determines an SL/TP trigger: the trigger remains the reference market price, while the simulated fill receives directional adverse slippage and entry/exit fees. Trade journals retain both reference and fill prices, fees, total execution cost, gross P&L, and net P&L. Equity and research metrics use net P&L. The default remains zero-cost compatible, and this remains research simulation with no live broker execution.

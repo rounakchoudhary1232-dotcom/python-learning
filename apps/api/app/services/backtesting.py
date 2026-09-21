@@ -7,6 +7,7 @@ from .trading import Candle, analyze_market, validate_candles
 from .strategies import StrategyEvaluator
 from .decision_engine import DecisionConstraints, DecisionEngine
 from .risk_engine import AccountRiskState, RiskLimits, assess
+from .execution_costs import ExecutionCostConfig, ExecutionCostModel
 
 def split_historical_candles(candles:list[Candle], split_ratio:float, minimum:int=2)->tuple[list[Candle],list[Candle]]:
     """Return chronological copies for future IS/OOS research; never mutates input."""
@@ -27,10 +28,10 @@ def walk_forward_windows(candles:list[Candle],config:WalkForwardConfig)->list[tu
 
 @dataclass(frozen=True)
 class BacktestConfig:
-    initial_balance: float = 10000.; fee_rate: float = 0.; slippage_rate: float = 0.; minimum_history: int = 20; split_ratio: float | None = None
+    initial_balance: float = 10000.; fee_rate: float = 0.; slippage_rate: float = 0.; minimum_history: int = 20; split_ratio: float | None = None; execution_costs: ExecutionCostConfig = ExecutionCostConfig()
 @dataclass(frozen=True)
 class BacktestTrade:
-    direction:str; entry_timestamp:str; entry:float; stop_loss:float; take_profit:float; quantity:float; exit_timestamp:str; exit_price:float; exit_reason:str; gross_pnl:float; fees:float; net_pnl:float; r_multiple:float
+    direction:str; entry_timestamp:str; entry:float; stop_loss:float; take_profit:float; quantity:float; exit_timestamp:str; exit_price:float; exit_reason:str; gross_pnl:float; fees:float; net_pnl:float; r_multiple:float; entry_reference_price:float|None=None; exit_reference_price:float|None=None; entry_fee:float=0.; exit_fee:float=0.; total_execution_cost:float=0.
 @dataclass(frozen=True)
 class EquityPoint:
     timestamp:str; balance:float; drawdown:float
@@ -45,7 +46,7 @@ class BacktestEngine:
     def run(self,symbol:str,timeframe:str,candles:list[Candle],config:BacktestConfig=BacktestConfig())->BacktestResult:
         if config.split_ratio is not None:
             ins,oos=split_historical_candles(candles,config.split_ratio)
-            base=BacktestConfig(config.initial_balance,config.fee_rate,config.slippage_rate,config.minimum_history)
+            base=BacktestConfig(config.initial_balance,config.fee_rate,config.slippage_rate,config.minimum_history,execution_costs=config.execution_costs)
             result=self.run(symbol,timeframe,ins,base)
             oos_result=self.run(symbol,timeframe,oos,base)
             return BacktestResult(result.symbol,result.timeframe,result.valid,result.errors,result.trades,result.equity_curve,result.metrics,result.warnings,result.strategy_research,result.strategy_statistics,result.regime_statistics,result.payload(),oos_result.payload(),config.split_ratio)
@@ -60,8 +61,8 @@ class BacktestEngine:
             research.append({"timestamp":candles[n].timestamp.isoformat(),"regime":context.regime["state"],"signals":[item.payload() for item in signals],"decision":decision.payload()})
             signal=decision.action
             if signal not in {"BUY","SELL"}: continue
-            entry_candle=candles[n+1]; entry=entry_candle.open*(1+config.slippage_rate if signal=="BUY" else 1-config.slippage_rate); risk=max(entry*.01,.01); stop=entry-risk if signal=="BUY" else entry+risk; target=entry+2*risk if signal=="BUY" else entry-2*risk; qty=(balance*.01)/risk
-            assessment=assess(signal,entry,stop,target,context.timestamp,AccountRiskState(balance,balance,trade_count_today=len(trades)),RiskLimits(.01,1.5,.03,5,.10))
+            entry_candle=candles[n+1]; entry=entry_candle.open; risk=max(entry*.01,.01); stop=entry-risk if signal=="BUY" else entry+risk; target=entry+2*risk if signal=="BUY" else entry-2*risk; qty=(balance*.01)/risk
+            assessment=assess(signal,entry,stop,target,None,AccountRiskState(balance,balance,trade_count_today=len(trades)),RiskLimits(.01,1.5,.03,5,.10))
             research[-1]["risk"]=assessment.payload()
             if not assessment.allowed: continue
             qty=assessment.calculated_position_size
@@ -73,11 +74,11 @@ class BacktestEngine:
                 if signal=="SELL" and candle.high>=stop: exit_price,reason=stop,"EXIT_SL";exit_candle=candle;break
                 if signal=="SELL" and candle.low<=target: exit_price,reason=target,"EXIT_TP";exit_candle=candle;break
             if exit_price is None: continue
-            gross=(exit_price-entry)*qty if signal=="BUY" else (entry-exit_price)*qty; fees=(entry+exit_price)*qty*config.fee_rate; net=gross-fees; balance+=net; peak=max(peak,balance); trade=BacktestTrade(signal,entry_candle.timestamp.isoformat(),entry,stop,target,qty,exit_candle.timestamp.isoformat(),exit_price,reason,gross,fees,net,net/(risk*qty));trades.append(trade);research[-1]["closed_trade_index"]=len(trades)-1;curve.append(EquityPoint(exit_candle.timestamp.isoformat(),balance,(peak-balance)/peak))
+            costs=ExecutionCostModel(_cost_config(config)).round_trip(signal,entry,exit_price,qty); gross=(costs.exit_price-costs.entry_price)*qty if signal=="BUY" else (costs.entry_price-costs.exit_price)*qty; fees=costs.entry_fee+costs.exit_fee; net=gross-fees; balance+=net; peak=max(peak,balance); trade=BacktestTrade(signal,entry_candle.timestamp.isoformat(),costs.entry_price,stop,target,qty,exit_candle.timestamp.isoformat(),costs.exit_price,reason,gross,fees,net,net/(risk*qty),entry,exit_price,costs.entry_fee,costs.exit_fee,costs.total_cost);trades.append(trade);research[-1]["closed_trade_index"]=len(trades)-1;curve.append(EquityPoint(exit_candle.timestamp.isoformat(),balance,(peak-balance)/peak))
         wins=[t.net_pnl for t in trades if t.net_pnl>0];losses=[t.net_pnl for t in trades if t.net_pnl<0]; gross_profit=sum(wins);gross_loss=abs(sum(losses));returns=[t.net_pnl/config.initial_balance for t in trades];streaks=_streaks(trades);maxdd=max((p.drawdown for p in curve),default=0);maxdd_absolute=_max_drawdown_absolute(config.initial_balance,curve);metrics={"total_trades":len(trades),"net_profit":round(balance-config.initial_balance,2),"final_balance":round(balance,2),"win_rate":round(len(wins)/len(trades),3) if trades else 0,"profit_factor":round(gross_profit/gross_loss,3) if gross_loss else 0,"expectancy":round(sum(t.net_pnl for t in trades)/len(trades),2) if trades else 0,"average_r":round(sum(t.r_multiple for t in trades)/len(trades),3) if trades else 0,"max_drawdown":maxdd,"max_drawdown_percent":maxdd,"max_drawdown_absolute":round(maxdd_absolute,2),"maximum_drawdown_duration":_drawdown_duration(curve),"average_trade_return":round(sum(returns)/len(returns),6) if returns else None,"median_trade_return":round(median(returns),6) if returns else None,"consecutive_wins":streaks[0],"consecutive_losses":streaks[1],"average_win":round(sum(wins)/len(wins),2) if wins else None,"average_loss":round(sum(losses)/len(losses),2) if losses else None,"largest_win":round(max(wins),2) if wins else None,"largest_loss":round(min(losses),2) if losses else None,"breakeven_trades":len(trades)-len(wins)-len(losses),"sharpe_like":_sharpe(returns)}
         warnings=[]
         if len(trades)<10:warnings.append("very few trades; research result is limited")
-        if config.fee_rate==0 and config.slippage_rate==0:warnings.append("zero-cost simulation")
+        if _cost_config(config)==ExecutionCostConfig():warnings.append("zero-cost simulation")
         if metrics["sharpe_like"] is None:warnings.append("risk-adjusted metric unavailable: insufficient or zero-variance returns")
         strategy_groups={};regime_groups={}
         for point in research:
@@ -118,3 +119,7 @@ def _sharpe(values):
     if len(values)<2:return None
     mean=sum(values)/len(values);variance=sum((x-mean)**2 for x in values)/len(values)
     return round(mean/math.sqrt(variance),6) if variance>0 else None
+def _cost_config(config):
+    """Use the new model while honoring legacy fee/slippage config fields."""
+    if config.execution_costs != ExecutionCostConfig(): return config.execution_costs
+    return ExecutionCostConfig(config.fee_rate,config.slippage_rate*10_000)

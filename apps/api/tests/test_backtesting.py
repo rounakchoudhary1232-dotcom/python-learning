@@ -2,6 +2,7 @@ import pytest
 from app.services.backtesting import BacktestConfig,BacktestEngine,WalkForwardConfig,split_historical_candles,walk_forward_windows
 from app.services.backtesting import EquityPoint, _max_drawdown_absolute
 from app.services.trading import SimulatedMarketDataProvider
+from app.services.execution_costs import ExecutionCostConfig
 def test_backtest_is_deterministic_research_only_and_validates_input():
  c=SimulatedMarketDataProvider().candles("SPY","5m",60);a=BacktestEngine().run("SPY","5m",c);b=BacktestEngine().run("SPY","5m",c)
  assert a.payload()==b.payload() and a.paper_only and a.research_only and a.valid
@@ -45,3 +46,7 @@ def test_extended_metrics_are_present_and_deterministic():
  assert {"max_drawdown_absolute","maximum_drawdown_duration","consecutive_wins","breakeven_trades","average_win","sharpe_like"}<=set(m)
 def test_absolute_drawdown_uses_starting_and_running_peak_equity():
  assert _max_drawdown_absolute(10000,[EquityPoint("a",9000,.1),EquityPoint("b",11000,0),EquityPoint("c",9900,.1)])==1100
+def test_backtest_trade_records_directional_fills_and_net_costs():
+ config=BacktestConfig(execution_costs=ExecutionCostConfig(fee_rate=.001,slippage_bps=10));result=BacktestEngine().run("SPY","5m",SimulatedMarketDataProvider().candles("SPY","5m",80),config)
+ assert result.trades and all(t.entry_fee>0 and t.exit_fee>0 and t.net_pnl<t.gross_pnl and t.total_execution_cost>t.fees for t in result.trades)
+ assert all((t.entry>t.entry_reference_price and t.exit_price<t.exit_reference_price) if t.direction=="BUY" else (t.entry<t.entry_reference_price and t.exit_price>t.exit_reference_price) for t in result.trades)
