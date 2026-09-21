@@ -45,3 +45,9 @@ Paper positions can be monitored through `POST /api/v1/trading/paper/monitor/{sy
 ## Phase 6 backtesting research
 
 `BacktestEngine` is a PAPER/RESEARCH-only chronological simulator. It validates historical candles, derives each signal from candles available through N, and enters only at N+1 open. SL is checked before TP when both touch in one OHLC candle. Fees and slippage are deterministic configuration rates; zero-cost runs are explicitly warned. Results include trades, an equity curve, net P&L, drawdown, profit factor, expectancy, average R, and small-sample warnings. Backtest results are historical simulations and do not guarantee future performance. Win rate alone is not sufficient to evaluate a strategy.
+
+Completed backtest trades are also grouped as `strategy_statistics` and `regime_statistics`. Attribution uses the selected strategies and actual regime retained at the original decision point; no signals or regimes are recalculated. These statistics describe historical backtest behavior and do not guarantee future performance.
+
+Walk-forward windows are chronological train/test partitions advanced by a configured step size; no test window informs its prior train window and no automatic optimization occurs. Walk-forward results are historical research results and do not guarantee future performance.
+
+Each complete walk-forward test window is now executed through the existing `BacktestEngine`; train ranges are retained as historical window metadata only. This is research evaluation only and does not select parameters or execute trades externally.

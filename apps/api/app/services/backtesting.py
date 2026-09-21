@@ -1,14 +1,33 @@
 """Deterministic, research-only historical simulation with no broker access."""
 from __future__ import annotations
 from dataclasses import asdict, dataclass
+from statistics import median
+import math
 from .trading import Candle, analyze_market, validate_candles
 from .strategies import StrategyEvaluator
 from .decision_engine import DecisionConstraints, DecisionEngine
 from .risk_engine import AccountRiskState, RiskLimits, assess
 
+def split_historical_candles(candles:list[Candle], split_ratio:float, minimum:int=2)->tuple[list[Candle],list[Candle]]:
+    """Return chronological copies for future IS/OOS research; never mutates input."""
+    if not 0 < split_ratio < 1: raise ValueError("split_ratio must be between 0 and 1")
+    if len(candles)<minimum: raise ValueError("insufficient candles for historical split")
+    boundary=int(len(candles)*split_ratio)
+    if boundary==0 or boundary==len(candles): raise ValueError("split leaves an empty historical partition")
+    return list(candles[:boundary]),list(candles[boundary:])
+@dataclass(frozen=True)
+class WalkForwardConfig:
+    train_size:int; test_size:int; step_size:int
+def walk_forward_windows(candles:list[Candle],config:WalkForwardConfig)->list[tuple[list[Candle],list[Candle]]]:
+    if min(config.train_size,config.test_size,config.step_size)<=0:raise ValueError("walk-forward sizes must be positive")
+    windows=[];start=0
+    while start+config.train_size+config.test_size<=len(candles):
+        windows.append((list(candles[start:start+config.train_size]),list(candles[start+config.train_size:start+config.train_size+config.test_size])));start+=config.step_size
+    return windows
+
 @dataclass(frozen=True)
 class BacktestConfig:
-    initial_balance: float = 10000.; fee_rate: float = 0.; slippage_rate: float = 0.; minimum_history: int = 20
+    initial_balance: float = 10000.; fee_rate: float = 0.; slippage_rate: float = 0.; minimum_history: int = 20; split_ratio: float | None = None
 @dataclass(frozen=True)
 class BacktestTrade:
     direction:str; entry_timestamp:str; entry:float; stop_loss:float; take_profit:float; quantity:float; exit_timestamp:str; exit_price:float; exit_reason:str; gross_pnl:float; fees:float; net_pnl:float; r_multiple:float
@@ -17,15 +36,21 @@ class EquityPoint:
     timestamp:str; balance:float; drawdown:float
 @dataclass(frozen=True)
 class BacktestResult:
-    symbol:str; timeframe:str; valid:bool; errors:list[str]; trades:list[BacktestTrade]; equity_curve:list[EquityPoint]; metrics:dict; warnings:list[str]; strategy_research:list[dict]; paper_only:bool=True; research_only:bool=True
+    symbol:str; timeframe:str; valid:bool; errors:list[str]; trades:list[BacktestTrade]; equity_curve:list[EquityPoint]; metrics:dict; warnings:list[str]; strategy_research:list[dict]; strategy_statistics:dict; regime_statistics:dict; in_sample:dict|None=None; out_of_sample:dict|None=None; split_ratio:float|None=None; walk_forward_results:list[dict]|None=None; paper_only:bool=True; research_only:bool=True
     def payload(self)->dict:return asdict(self)
 
 class BacktestEngine:
     """Signals at N close, enters only at N+1 open; both touched exits use SL first."""
     def __init__(self,evaluator:StrategyEvaluator|None=None,decision_engine:DecisionEngine|None=None): self.evaluator=evaluator or StrategyEvaluator();self.decision_engine=decision_engine or DecisionEngine(self.evaluator)
     def run(self,symbol:str,timeframe:str,candles:list[Candle],config:BacktestConfig=BacktestConfig())->BacktestResult:
+        if config.split_ratio is not None:
+            ins,oos=split_historical_candles(candles,config.split_ratio)
+            base=BacktestConfig(config.initial_balance,config.fee_rate,config.slippage_rate,config.minimum_history)
+            result=self.run(symbol,timeframe,ins,base)
+            oos_result=self.run(symbol,timeframe,oos,base)
+            return BacktestResult(result.symbol,result.timeframe,result.valid,result.errors,result.trades,result.equity_curve,result.metrics,result.warnings,result.strategy_research,result.strategy_statistics,result.regime_statistics,result.payload(),oos_result.payload(),config.split_ratio)
         valid,errors=validate_candles(candles,config.minimum_history)
-        if not valid:return BacktestResult(symbol,timeframe,False,errors,[],[],{},["historical input rejected"],[])
+        if not valid:return BacktestResult(symbol,timeframe,False,errors,[],[],{},["historical input rejected"],[],{}, {})
         balance,peak=config.initial_balance,config.initial_balance; trades=[]; curve=[]; research=[]
         # Pure deterministic research signal: previous close direction; no future values are read.
         for n in range(config.minimum_history,len(candles)-1):
@@ -48,9 +73,48 @@ class BacktestEngine:
                 if signal=="SELL" and candle.high>=stop: exit_price,reason=stop,"EXIT_SL";exit_candle=candle;break
                 if signal=="SELL" and candle.low<=target: exit_price,reason=target,"EXIT_TP";exit_candle=candle;break
             if exit_price is None: continue
-            gross=(exit_price-entry)*qty if signal=="BUY" else (entry-exit_price)*qty; fees=(entry+exit_price)*qty*config.fee_rate; net=gross-fees; balance+=net; peak=max(peak,balance); trades.append(BacktestTrade(signal,entry_candle.timestamp.isoformat(),entry,stop,target,qty,exit_candle.timestamp.isoformat(),exit_price,reason,gross,fees,net,net/(risk*qty)));curve.append(EquityPoint(exit_candle.timestamp.isoformat(),balance,(peak-balance)/peak))
-        wins=[t.net_pnl for t in trades if t.net_pnl>0];losses=[t.net_pnl for t in trades if t.net_pnl<0]; gross_profit=sum(wins);gross_loss=abs(sum(losses));metrics={"total_trades":len(trades),"net_profit":round(balance-config.initial_balance,2),"final_balance":round(balance,2),"win_rate":round(len(wins)/len(trades),3) if trades else 0,"profit_factor":round(gross_profit/gross_loss,3) if gross_loss else 0,"expectancy":round(sum(t.net_pnl for t in trades)/len(trades),2) if trades else 0,"average_r":round(sum(t.r_multiple for t in trades)/len(trades),3) if trades else 0,"max_drawdown":max((p.drawdown for p in curve),default=0)}
+            gross=(exit_price-entry)*qty if signal=="BUY" else (entry-exit_price)*qty; fees=(entry+exit_price)*qty*config.fee_rate; net=gross-fees; balance+=net; peak=max(peak,balance); trade=BacktestTrade(signal,entry_candle.timestamp.isoformat(),entry,stop,target,qty,exit_candle.timestamp.isoformat(),exit_price,reason,gross,fees,net,net/(risk*qty));trades.append(trade);research[-1]["closed_trade_index"]=len(trades)-1;curve.append(EquityPoint(exit_candle.timestamp.isoformat(),balance,(peak-balance)/peak))
+        wins=[t.net_pnl for t in trades if t.net_pnl>0];losses=[t.net_pnl for t in trades if t.net_pnl<0]; gross_profit=sum(wins);gross_loss=abs(sum(losses));returns=[t.net_pnl/config.initial_balance for t in trades];streaks=_streaks(trades);maxdd=max((p.drawdown for p in curve),default=0);maxdd_absolute=_max_drawdown_absolute(config.initial_balance,curve);metrics={"total_trades":len(trades),"net_profit":round(balance-config.initial_balance,2),"final_balance":round(balance,2),"win_rate":round(len(wins)/len(trades),3) if trades else 0,"profit_factor":round(gross_profit/gross_loss,3) if gross_loss else 0,"expectancy":round(sum(t.net_pnl for t in trades)/len(trades),2) if trades else 0,"average_r":round(sum(t.r_multiple for t in trades)/len(trades),3) if trades else 0,"max_drawdown":maxdd,"max_drawdown_percent":maxdd,"max_drawdown_absolute":round(maxdd_absolute,2),"maximum_drawdown_duration":_drawdown_duration(curve),"average_trade_return":round(sum(returns)/len(returns),6) if returns else None,"median_trade_return":round(median(returns),6) if returns else None,"consecutive_wins":streaks[0],"consecutive_losses":streaks[1],"average_win":round(sum(wins)/len(wins),2) if wins else None,"average_loss":round(sum(losses)/len(losses),2) if losses else None,"largest_win":round(max(wins),2) if wins else None,"largest_loss":round(min(losses),2) if losses else None,"breakeven_trades":len(trades)-len(wins)-len(losses),"sharpe_like":_sharpe(returns)}
         warnings=[]
         if len(trades)<10:warnings.append("very few trades; research result is limited")
         if config.fee_rate==0 and config.slippage_rate==0:warnings.append("zero-cost simulation")
-        return BacktestResult(symbol,timeframe,True,[],trades,curve,metrics,warnings,research)
+        if metrics["sharpe_like"] is None:warnings.append("risk-adjusted metric unavailable: insufficient or zero-variance returns")
+        strategy_groups={};regime_groups={}
+        for point in research:
+            if "closed_trade_index" not in point:continue
+            trade=trades[point["closed_trade_index"]]
+            for name in point["decision"].get("selected_strategies",[]):strategy_groups.setdefault(name,[]).append(trade)
+            regime_groups.setdefault(point["regime"],[]).append(trade)
+        return BacktestResult(symbol,timeframe,True,[],trades,curve,metrics,warnings,research,{k:_statistics(v) for k,v in strategy_groups.items()},{k:_statistics(v) for k,v in regime_groups.items()})
+
+    def walk_forward(self,symbol:str,timeframe:str,candles:list[Candle],config:WalkForwardConfig,backtest_config:BacktestConfig=BacktestConfig())->list[dict]:
+        windows=walk_forward_windows(candles,config)
+        if not windows: return []
+        return [{"window_index":i,"train_start":train[0].timestamp.isoformat(),"train_end":train[-1].timestamp.isoformat(),"test_start":test[0].timestamp.isoformat(),"test_end":test[-1].timestamp.isoformat(),"train_candle_count":len(train),"test_candle_count":len(test),"result":self.run(symbol,timeframe,test,backtest_config).payload()} for i,(train,test) in enumerate(windows)]
+
+def _statistics(trades:list[BacktestTrade])->dict:
+    wins=[t for t in trades if t.net_pnl>0];losses=[t for t in trades if t.net_pnl<0];gross_profit=sum(t.net_pnl for t in wins);gross_loss=abs(sum(t.net_pnl for t in losses));count=len(trades)
+    return {"trade_count":count,"wins":len(wins),"losses":len(losses),"breakeven":count-len(wins)-len(losses),"net_profit":round(sum(t.net_pnl for t in trades),2),"win_rate":round(len(wins)/count,3) if count else 0,"gross_profit":round(gross_profit,2),"gross_loss":round(gross_loss,2),"profit_factor":round(gross_profit/gross_loss,3) if gross_loss else None,"expectancy":round(sum(t.net_pnl for t in trades)/count,2) if count else 0,"average_r":round(sum(t.r_multiple for t in trades)/count,3) if count else 0}
+def _streaks(trades):
+    bestw=bestl=current=0;kind=None
+    for trade in trades:
+        nextkind="w" if trade.net_pnl>0 else "l" if trade.net_pnl<0 else None
+        current=current+1 if nextkind and nextkind==kind else 1 if nextkind else 0;kind=nextkind
+        if kind=="w":bestw=max(bestw,current)
+        if kind=="l":bestl=max(bestl,current)
+    return bestw,bestl
+def _drawdown_duration(curve):
+    peak=0;run=best=0
+    for point in curve:
+        if point.balance>=peak:peak=point.balance;run=0
+        else:run+=1;best=max(best,run)
+    return best
+def _max_drawdown_absolute(initial_balance,curve):
+    peak=initial_balance;maximum=0.
+    for point in curve:
+        peak=max(peak,point.balance);maximum=max(maximum,peak-point.balance)
+    return maximum
+def _sharpe(values):
+    if len(values)<2:return None
+    mean=sum(values)/len(values);variance=sum((x-mean)**2 for x in values)/len(values)
+    return round(mean/math.sqrt(variance),6) if variance>0 else None
