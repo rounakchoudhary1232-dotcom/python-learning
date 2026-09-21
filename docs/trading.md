@@ -51,3 +51,7 @@ Completed backtest trades are also grouped as `strategy_statistics` and `regime_
 Walk-forward windows are chronological train/test partitions advanced by a configured step size; no test window informs its prior train window and no automatic optimization occurs. Walk-forward results are historical research results and do not guarantee future performance.
 
 Each complete walk-forward test window is now executed through the existing `BacktestEngine`; train ranges are retained as historical window metadata only. This is research evaluation only and does not select parameters or execute trades externally.
+
+## Phase 7 execution-cost model
+
+The reusable research cost model applies deterministic adverse slippage to execution prices and fees to executed notional (`price × quantity × fee_rate`), with an optional minimum fee. BUY entries and SELL exits slip upward; BUY exits and SELL entries slip downward. It is a simulation utility only: it has no broker, live execution, or external-account integration.
